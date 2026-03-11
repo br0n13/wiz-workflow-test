@@ -1,0 +1,79 @@
+name: Reusable Wiz Security Scan
+
+on:
+  workflow_call:
+    inputs:
+      scan_path:
+        description: Path to scan
+        required: false
+        type: string
+        default: .
+    secrets:
+      WIZ_CLIENT_ID:
+        required: true
+      WIZ_CLIENT_SECRET:
+        required: true
+
+permissions:
+  contents: read
+  pull-requests: write
+  checks: write
+
+jobs:
+  wiz-scan:
+    name: Wiz CLI scan
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: sudo apt-get update && sudo apt-get install -y jq
+
+      - name: Install Wiz CLI
+        run: |
+          curl -Lo wizcli https://wizcli.app/wizcli
+          chmod +x wizcli
+          sudo mv wizcli /usr/local/bin/
+
+      - name: Authenticate Wiz CLI
+        env:
+          WIZ_CLIENT_ID: ${{ secrets.WIZ_CLIENT_ID }}
+          WIZ_CLIENT_SECRET: ${{ secrets.WIZ_CLIENT_SECRET }}
+        run: |
+          wizcli auth \
+            --client-id "$WIZ_CLIENT_ID" \
+            --client-secret "$WIZ_CLIENT_SECRET"
+
+      - name: Run Wiz scan
+        run: |
+          wizcli scan dir "${{ inputs.scan_path }}" \
+            --policy "default vulnerability management" \
+            --format json \
+            --output wiz-results.json \
+            --fail-on-issues false
+
+      - name: Extract High and Critical findings
+        run: |
+          python3 scripts/extract_wiz_findings.py \
+            --input wiz-results.json \
+            --output filtered-findings.json \
+            --markdown wiz-pr-comment.md
+
+      - name: Post findings to pull request
+        if: ${{ github.event_name == 'pull_request' }}
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          python3 scripts/generate_pr_comment.py \
+            --comment-file wiz-pr-comment.md
+
+      - name: Upload Wiz JSON report
+        uses: actions/upload-artifact@v4
+        with:
+          name: wiz-results
+          path: wiz-results.json
+          if-no-files-found: error
