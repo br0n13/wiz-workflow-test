@@ -1,0 +1,24 @@
+name: Request Central Wiz Scan
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+jobs:
+  request-central-scan:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Dispatch scan to centralized security repository
+        uses: peter-evans/repository-dispatch@v3
+        with:
+          token: ${{ secrets.CENTRAL_SCAN_PAT }}
+          repository: your-org/centralized-security-scans
+          event-type: wiz-cli-scan
+          client-payload: >-
+            {
+              "target_owner": "${{ github.repository_owner }}",
+              "target_repo": "${{ github.event.repository.name }}",
+              "target_ref": "${{ github.event.pull_request.head.sha }}",
+              "pull_request_number": "${{ github.event.pull_request.number }}",
+              "installation_id": "${{ secrets.GH_APP_INSTALLATION_ID }}"
+            }
