@@ -12,7 +12,7 @@ This guide explains how to migrate from the previous centralized webhook + dispa
 
 - A reusable workflow at `.github/workflows/wiz-scan.yml`
 - Wiz CLI installation and authentication in GitHub Actions
-- Wiz scan execution with policy `default vulnerability management`
+- Wiz scan execution with policy `default vulnerability scanning`
 - JSON findings extraction for `CRITICAL` and `HIGH` severities only
 - Pull request comments containing actual Wiz findings
 - Artifact upload of full `wiz-results.json`
