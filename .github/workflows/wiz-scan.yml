@@ -2,12 +2,6 @@ name: Reusable Wiz Security Scan
 
 on:
   workflow_call:
-    inputs:
-      scan_path:
-        description: Path to scan
-        required: false
-        type: string
-        default: .
     secrets:
       WIZ_CLIENT_ID:
         required: true
@@ -19,6 +13,10 @@ permissions:
   pull-requests: write
   checks: write
 
+concurrency:
+  group: wiz-main-scan
+  cancel-in-progress: true
+
 jobs:
   wiz-scan:
     name: Wiz CLI scan
@@ -27,9 +25,8 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
-
-      - name: Install dependencies
-        run: sudo apt-get update && sudo apt-get install -y jq
+        with:
+          fetch-depth: 0
 
       - name: Install Wiz CLI
         run: |
@@ -37,32 +34,124 @@ jobs:
           chmod +x wizcli
           sudo mv wizcli /usr/local/bin/
 
-      - name: Authenticate Wiz CLI
+      - name: Detect changed files for PR differential scan
+        id: detect_changes
+        if: ${{ github.event_name == 'pull_request' }}
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+
+          git fetch --no-tags origin "$BASE_SHA"
+          git diff --name-status "$BASE_SHA" "$HEAD_SHA" > changed_files_raw.txt
+
+          : > changed_files.txt
+          while IFS=$'\t' read -r status path1 path2; do
+            case "$status" in
+              M|A)
+                if [ -n "${path1:-}" ]; then
+                  echo "$path1" >> changed_files.txt
+                fi
+                ;;
+              R*)
+                if [ -n "${path2:-}" ]; then
+                  echo "$path2" >> changed_files.txt
+                fi
+                ;;
+              D)
+                ;;
+            esac
+          done < changed_files_raw.txt
+
+          sort -u changed_files.txt -o changed_files.txt || true
+
+          if [ ! -s changed_files.txt ]; then
+            echo "No changed files detected for PR scan"
+            echo "[]" > changed_dirs.txt
+            echo '{"findings":[]}' > wiz-results.json
+            echo "has_dirs=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          xargs -a changed_files.txt -I{} dirname "{}" | sort -u > changed_dirs.txt
+
+          while IFS= read -r file; do
+            case "$file" in
+              Dockerfile|package.json|requirements.txt|go.mod|pom.xml|pyproject.toml)
+                echo "." >> changed_dirs.txt
+                ;;
+            esac
+          done < changed_files.txt
+
+          sort -u changed_dirs.txt -o changed_dirs.txt
+
+          if [ ! -s changed_dirs.txt ]; then
+            echo "No changed directories detected for PR scan"
+            echo '{"findings":[]}' > wiz-results.json
+            echo "has_dirs=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "has_dirs=true" >> "$GITHUB_OUTPUT"
+
+      - name: Run PR differential Wiz scan
+        if: ${{ github.event_name == 'pull_request' && steps.detect_changes.outputs.has_dirs == 'true' }}
         env:
           WIZ_CLIENT_ID: ${{ secrets.WIZ_CLIENT_ID }}
           WIZ_CLIENT_SECRET: ${{ secrets.WIZ_CLIENT_SECRET }}
         run: |
-          wizcli auth \
-            --client-id "$WIZ_CLIENT_ID" \
-            --client-secret "$WIZ_CLIENT_SECRET"
+          set -euo pipefail
+          mapfile -t DIR_ARRAY < changed_dirs.txt
 
-      - name: Run Wiz scan
-        run: |
-          wizcli scan dir "${{ inputs.scan_path }}" \
-            --policy "default vulnerability management" \
+          if [ "${#DIR_ARRAY[@]}" -eq 0 ]; then
+            echo "No changed directories detected"
+            echo '{"findings":[]}' > wiz-results.json
+            exit 0
+          fi
+
+          wizcli scan dir "${DIR_ARRAY[@]}" \
+            --client-id "$WIZ_CLIENT_ID" \
+            --client-secret "$WIZ_CLIENT_SECRET" \
             --format json \
             --output wiz-results.json \
             --fail-on-issues false
 
-      - name: Extract High and Critical findings
+      - name: Run full repository Wiz scan on main
+        if: ${{ github.event_name == 'push' && github.ref_name == 'main' }}
+        env:
+          WIZ_CLIENT_ID: ${{ secrets.WIZ_CLIENT_ID }}
+          WIZ_CLIENT_SECRET: ${{ secrets.WIZ_CLIENT_SECRET }}
+        run: |
+          wizcli scan dir . \
+            --client-id "$WIZ_CLIENT_ID" \
+            --client-secret "$WIZ_CLIENT_SECRET" \
+            --format json \
+            --output wiz-results.json \
+            --fail-on-issues false
+
+      - name: Ensure Wiz results file exists
+        run: |
+          if [ ! -f wiz-results.json ]; then
+            echo '{"findings":[]}' > wiz-results.json
+          fi
+
+      - name: Extract HIGH and CRITICAL findings
         run: |
           python3 scripts/extract_wiz_findings.py \
             --input wiz-results.json \
             --output filtered-findings.json \
             --markdown wiz-pr-comment.md
 
-      - name: Post findings to pull request
+      - name: Count findings
+        id: findings_count
         if: ${{ github.event_name == 'pull_request' }}
+        run: |
+          count=$(python3 -c 'import json; print(len(json.load(open("filtered-findings.json", encoding="utf-8"))))')
+          echo "count=$count" >> "$GITHUB_OUTPUT"
+
+      - name: Post findings to pull request
+        if: ${{ github.event_name == 'pull_request' && steps.findings_count.outputs.count != '0' }}
         env:
           GITHUB_TOKEN: ${{ github.token }}
           GITHUB_REPOSITORY: ${{ github.repository }}
