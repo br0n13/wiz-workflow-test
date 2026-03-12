@@ -33,7 +33,7 @@ jobs:
 
       - name: Install Wiz CLI
         run: |
-          curl -Lo wizcli https://wizcli.app/wizcli
+          curl -Lo wizcli https://downloads.wiz.io/v1/wizcli/latest/wizcli-linux-amd64
           chmod +x wizcli
           sudo mv wizcli /usr/local/bin/
 
