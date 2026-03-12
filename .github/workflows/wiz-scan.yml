@@ -100,6 +100,16 @@ jobs:
           fi
 
           mkdir -p wiz-partials
+
+          HELP_TEXT=$(wizcli scan dir --help 2>&1 || true)
+          SCAN_BASE_ARGS=()
+          if printf '%s' "$HELP_TEXT" | grep -q -- '--policy'; then
+            SCAN_BASE_ARGS+=(--policy "default vulnerability management")
+          fi
+          if printf '%s' "$HELP_TEXT" | grep -q -- '--fail-on-issues'; then
+            SCAN_BASE_ARGS+=(--fail-on-issues false)
+          fi
+
           i=0
           while IFS= read -r dir; do
             [ -z "$dir" ] && continue
@@ -107,11 +117,13 @@ jobs:
             output="wiz-partials/wiz-results-${i}.json"
 
             echo "Scanning directory: $dir"
-            wizcli scan dir "$dir" \
-              --policy "default vulnerability management" \
-              --format json \
-              --output "$output" \
-              --fail-on-issues false
+            if printf '%s' "$HELP_TEXT" | grep -q -- '--output-file'; then
+              wizcli scan dir "$dir" "${SCAN_BASE_ARGS[@]}" --output-file "$output"
+            elif printf '%s' "$HELP_TEXT" | grep -q -- '--output'; then
+              wizcli scan dir "$dir" "${SCAN_BASE_ARGS[@]}" --output "$output"
+            else
+              wizcli scan dir "$dir" "${SCAN_BASE_ARGS[@]}" > "$output"
+            fi
           done < changed_dirs.txt
 
           if [ "$i" -eq 0 ]; then
@@ -123,11 +135,24 @@ jobs:
       - name: Run full Wiz scan for main branch pushes and workflow calls
         if: ${{ github.event_name != 'pull_request' }}
         run: |
-          wizcli scan dir . \
-            --policy "default vulnerability management" \
-            --format json \
-            --output wiz-results.json \
-            --fail-on-issues false
+          set -euo pipefail
+
+          HELP_TEXT=$(wizcli scan dir --help 2>&1 || true)
+          SCAN_BASE_ARGS=()
+          if printf '%s' "$HELP_TEXT" | grep -q -- '--policy'; then
+            SCAN_BASE_ARGS+=(--policy "default vulnerability management")
+          fi
+          if printf '%s' "$HELP_TEXT" | grep -q -- '--fail-on-issues'; then
+            SCAN_BASE_ARGS+=(--fail-on-issues false)
+          fi
+
+          if printf '%s' "$HELP_TEXT" | grep -q -- '--output-file'; then
+            wizcli scan dir . "${SCAN_BASE_ARGS[@]}" --output-file wiz-results.json
+          elif printf '%s' "$HELP_TEXT" | grep -q -- '--output'; then
+            wizcli scan dir . "${SCAN_BASE_ARGS[@]}" --output wiz-results.json
+          else
+            wizcli scan dir . "${SCAN_BASE_ARGS[@]}" > wiz-results.json
+          fi
 
       - name: Extract High and Critical findings
         run: |
