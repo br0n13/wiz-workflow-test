@@ -2,17 +2,16 @@ name: Reusable Wiz Security Scan
 
 on:
   workflow_call:
-    inputs:
-      scan_path:
-        description: Path to scan
-        required: false
-        type: string
-        default: .
     secrets:
       WIZ_CLIENT_ID:
         required: true
       WIZ_CLIENT_SECRET:
         required: true
+  pull_request:
+    types: [opened, synchronize, reopened]
+  push:
+    branches:
+      - main
 
 permissions:
   contents: read
@@ -23,10 +22,15 @@ jobs:
   wiz-scan:
     name: Wiz CLI scan
     runs-on: ubuntu-latest
+    concurrency:
+      group: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && 'wiz-main-scan' || format('wiz-scan-{0}', github.run_id) }}
+      cancel-in-progress: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Install dependencies
         run: sudo apt-get update && sudo apt-get install -y jq
@@ -46,9 +50,68 @@ jobs:
             --client-id "$WIZ_CLIENT_ID" \
             --client-secret "$WIZ_CLIENT_SECRET"
 
-      - name: Run Wiz scan
+      - name: Detect changed files for PR scan
+        if: ${{ github.event_name == 'pull_request' }}
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
-          wizcli scan dir "${{ inputs.scan_path }}" \
+          set -euo pipefail
+
+          git fetch origin "$BASE_SHA"
+          git diff --name-status "$BASE_SHA" "$HEAD_SHA" > changed_files_raw.txt
+
+          : > changed_files.txt
+          while IFS=$'\t' read -r status path1 path2; do
+            code="${status%%[0-9]*}"
+            case "$code" in
+              M|A)
+                echo "$path1" >> changed_files.txt
+                ;;
+              R)
+                echo "$path2" >> changed_files.txt
+                ;;
+              D)
+                ;;
+            esac
+          done < changed_files_raw.txt
+
+          sort -u -o changed_files.txt changed_files.txt
+
+          if [ -s changed_files.txt ]; then
+            xargs -I{} dirname "{}" < changed_files.txt | sort -u > changed_dirs.txt
+          else
+            : > changed_dirs.txt
+          fi
+
+          if grep -Eq '^(Dockerfile|package\.json|requirements\.txt|go\.mod|pom\.xml|pyproject\.toml)$' changed_files.txt; then
+            echo "." >> changed_dirs.txt
+          fi
+
+          sort -u -o changed_dirs.txt changed_dirs.txt
+
+      - name: Run differential Wiz scan for pull requests
+        if: ${{ github.event_name == 'pull_request' }}
+        run: |
+          set -euo pipefail
+          DIRS=$(tr '\n' ' ' < changed_dirs.txt | xargs)
+
+          if [ -z "$DIRS" ]; then
+            echo "No changed files detected"
+            echo '{"findings": []}' > wiz-results.json
+            exit 0
+          fi
+
+          wizcli scan dir $DIRS \
+            --policy "default vulnerability management" \
+            --format json \
+            --output wiz-results.json \
+            --fail-on-issues false
+
+      - name: Run full Wiz scan for main branch pushes and workflow calls
+        if: ${{ github.event_name != 'pull_request' }}
+        run: |
+          wizcli scan dir . \
             --policy "default vulnerability management" \
             --format json \
             --output wiz-results.json \

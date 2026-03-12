@@ -1,68 +1,104 @@
-# Security Platform: Reusable Wiz CLI Workflow
+# Wiz Security Scanning Platform
 
-## 1. Overview
+## Overview
 
-This repository provides a reusable GitHub Actions workflow for running Wiz CLI security scans across repositories without webhook infrastructure. Repositories call a centralized workflow using `workflow_call`, and findings are posted directly to pull requests.
+This repository provides a reusable GitHub workflow that performs Wiz CLI security scans.
 
-## 2. Architecture Diagram
+Repositories can integrate this workflow to automatically scan pull requests and main branch commits.
 
-```text
-Target Repo (PR / Push)
-          |
-          v
-Repository Workflow
-          |
-          v
-Reusable Workflow (.github/workflows/wiz-scan.yml)
-          |
-          v
-Wiz CLI Scan -> Filter High/Critical -> PR Comment + Artifact
-```
+## Architecture
 
-Flow summary:
+PR Workflow
 
-Target Repo → Reusable Workflow → Wiz Scan → PR Comment
+Pull Request
+     ↓
+Detect Changed Files
+     ↓
+Convert Files → Directories
+     ↓
+Wiz CLI Scan
+     ↓
+Post Results to PR
 
-## 3. Prerequisites
+Main Branch Workflow
 
-Before integrating, make sure you have:
+Merge to main
+     ↓
+Full Repository Scan
+     ↓
+Upload Results Artifact
 
-- Wiz CLI credentials:
-  - `WIZ_CLIENT_ID`
-  - `WIZ_CLIENT_SECRET`
-- GitHub repository access to configure Actions and secrets.
-- Permissions for workflows to comment on pull requests.
+## Scanning Strategy
 
-## 4. Setup Wiz Credentials
+Pull Requests
 
-Add the following secrets in each target repository (or org-level secrets if preferred):
+Only the code changed in the PR is scanned.
 
-- `WIZ_CLIENT_ID`
-- `WIZ_CLIENT_SECRET`
+This reduces security noise and ensures developers only see vulnerabilities related to their changes.
 
-Path in GitHub UI:
+Main Branch
 
-1. `Settings`
-2. `Secrets and variables`
-3. `Actions`
-4. `New repository secret`
+The entire repository is scanned after merges to ensure full coverage.
 
-Screenshot placeholder guidance:
+## Performance Optimization
 
-- Capture the **Settings → Secrets → Actions** page.
-- Capture the form where `WIZ_CLIENT_ID` and `WIZ_CLIENT_SECRET` are entered.
+Directory-based scanning is used instead of scanning individual files.
 
-## 5. How to Add Scanning to an Existing Repository
+Example:
 
-### Step 1
+Changed files:
 
-Create a workflow file:
+src/auth/login.py
+src/auth/session.py
+terraform/main.tf
 
-`.github/workflows/security.yml`
+Directories scanned:
 
-### Step 2
+src/auth
+terraform
 
-Add this workflow:
+This significantly reduces scan time.
+
+## Handling Edge Cases
+
+New Files
+
+New files added in the PR are scanned fully.
+
+Renamed Files
+
+Renamed files scan the new file path.
+
+Deleted Files
+
+Deleted files are ignored.
+
+Root Files
+
+Changes to dependency files trigger a root scan.
+
+Examples:
+
+Dockerfile
+package.json
+requirements.txt
+
+## Setup Instructions
+
+Step 1
+
+Add repository secrets:
+
+WIZ_CLIENT_ID
+WIZ_CLIENT_SECRET
+
+Step 2
+
+Create workflow:
+
+.github/workflows/security.yml
+
+Example:
 
 ```yaml
 name: Wiz Security Scan
@@ -75,130 +111,38 @@ on:
 
 jobs:
   wiz-scan:
-    uses: my-org/security-platform/.github/workflows/wiz-scan.yml@main
+    uses: stratus-ai/security-platform/.github/workflows/wiz-scan.yml@main
     secrets: inherit
 ```
 
-### Step 3
+Step 3
 
-Commit the workflow:
+Commit and open a PR.
 
-```bash
-git add .github/workflows/security.yml
-git commit -m "Add reusable Wiz security scan workflow"
-```
+## Example PR Output
 
-### Step 4
-
-Open a pull request to trigger scanning.
-
-## 6. Example Output
-
-Example PR comment containing actual findings:
-
-```markdown
 ## Wiz Security Scan Results
 
-| Severity | Vulnerability | Package | Version | Fix |
-|---------|---------------|---------|---------|-----|
-| CRITICAL | CVE-2024-XXXX | openssl | 1.0.1 | 1.0.2 |
-| HIGH | CVE-2023-XXXX | lodash | 4.17.15 | 4.17.21 |
+| Severity | Vulnerability | Package | Version |
+|----------|---------------|--------|--------|
+| CRITICAL | CVE-XXXX | openssl | 1.1.1 |
+| HIGH | CVE-XXXX | lodash | 4.17.15 |
+
+## Viewing Full Scan Results
+
+Go to:
+
+Actions → Workflow Run → Artifacts → wiz-results.json
+
+## Concurrency Behavior
+
+When multiple PRs merge quickly, older scans are cancelled and only the newest main branch scan runs.
+
+## Security Permissions
+
+```yaml
+permissions:
+  contents: read
+  pull-requests: write
+  checks: write
 ```
-
-If no high or critical vulnerabilities are detected, the workflow posts:
-
-`No High or Critical vulnerabilities detected.`
-
-## 7. Viewing Full Scan Results
-
-Download the complete JSON report from GitHub Actions:
-
-1. Open `Actions`
-2. Select the workflow run
-3. Open `Artifacts`
-4. Download `wiz-results` (contains `wiz-results.json`)
-
-## 8. Troubleshooting
-
-### Wiz authentication failure
-
-Symptoms:
-- `wizcli auth` fails
-
-Checks:
-- Verify `WIZ_CLIENT_ID` and `WIZ_CLIENT_SECRET`
-- Confirm credentials are active and not rotated/expired
-- Confirm secrets were added in the correct repository/environment
-
-### Missing secrets
-
-Symptoms:
-- Workflow errors before or during authentication
-
-Checks:
-- Validate secret names are exact (`WIZ_CLIENT_ID`, `WIZ_CLIENT_SECRET`)
-- If using reusable workflow in another repo, ensure secrets are inherited or explicitly mapped
-
-### Workflow permissions issues
-
-Symptoms:
-- PR comment step fails with `403` or permission errors
-
-Checks:
-- Ensure workflow/job has:
-  - `contents: read`
-  - `pull-requests: write`
-  - `checks: write`
-- Ensure repository settings allow GitHub Actions to create/approve PR comments as needed
-
-## 9. Security Model
-
-The reusable workflow uses minimal permissions:
-
-- `contents: read` for checkout
-- `pull-requests: write` for posting PR comments
-- `checks: write` for checks integration compatibility
-
-The workflow behavior is intentionally non-blocking:
-
-- Scan runs with `--fail-on-issues false`
-- Findings are reported to PRs for visibility
-- Build status is not failed solely due to vulnerabilities
-
-## Repository Structure
-
-```text
-security-platform/
-  .github/workflows/wiz-scan.yml
-  scripts/
-    extract_wiz_findings.py
-    generate_pr_comment.py
-  docs/
-    integration.md
-  example/
-    repo-workflow.yml
-  README.md
-```
-
-## Reusable Workflow Details
-
-Location: `.github/workflows/wiz-scan.yml`
-
-- Trigger: `workflow_call`
-- Input: `scan_path`
-- Required secrets:
-  - `WIZ_CLIENT_ID`
-  - `WIZ_CLIENT_SECRET`
-- Steps:
-  1. Checkout repository
-  2. Install Wiz CLI
-  3. Authenticate Wiz CLI
-  4. Run scan with Wiz policy `default vulnerability management` and emit `wiz-results.json`
-  5. Filter to `CRITICAL`/`HIGH`
-  6. Format markdown table
-  7. Post PR comment
-  8. Upload full JSON artifact
-
-## Migration Summary
-
-This implementation removes webhook listeners and GitHub App dispatch logic in favor of native reusable workflows, replacing Semgrep scans with Wiz CLI while preserving centralized governance and PR-level visibility.
