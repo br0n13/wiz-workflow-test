@@ -113,6 +113,7 @@ jobs:
           wizcli scan dir "${DIR_ARRAY[@]}" \
             --client-id "$WIZ_CLIENT_ID" \
             --client-secret "$WIZ_CLIENT_SECRET" \
+            --policy "default vulnerability scanning" \
             --format json \
             --output wiz-results.json \
             --fail-on-issues false
@@ -126,6 +127,7 @@ jobs:
           wizcli scan dir . \
             --client-id "$WIZ_CLIENT_ID" \
             --client-secret "$WIZ_CLIENT_SECRET" \
+            --policy "default vulnerability scanning" \
             --format json \
             --output wiz-results.json \
             --fail-on-issues false
