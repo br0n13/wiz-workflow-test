@@ -46,7 +46,24 @@ jobs:
           WIZ_CLIENT_ID: ${{ secrets.WIZ_CLIENT_ID }}
           WIZ_CLIENT_SECRET: ${{ secrets.WIZ_CLIENT_SECRET }}
         run: |
-          wizcli auth
+          set -euo pipefail
+
+          if [ -z "${WIZ_CLIENT_ID:-}" ] || [ -z "${WIZ_CLIENT_SECRET:-}" ]; then
+            echo "WIZ_CLIENT_ID and WIZ_CLIENT_SECRET must both be set"
+            exit 1
+          fi
+
+          AUTH_HELP=$(wizcli auth --help 2>&1 || true)
+
+          if printf '%s' "$AUTH_HELP" | grep -q -- '--client-id' && printf '%s' "$AUTH_HELP" | grep -q -- '--client-secret'; then
+            wizcli auth --client-id "$WIZ_CLIENT_ID" --client-secret "$WIZ_CLIENT_SECRET"
+          elif printf '%s' "$AUTH_HELP" | grep -q -- '--id' && printf '%s' "$AUTH_HELP" | grep -q -- '--secret'; then
+            wizcli auth --id "$WIZ_CLIENT_ID" --secret "$WIZ_CLIENT_SECRET"
+          elif printf '%s' "$AUTH_HELP" | grep -q -- '--client' && printf '%s' "$AUTH_HELP" | grep -q -- '--secret'; then
+            wizcli auth --client "$WIZ_CLIENT_ID" --secret "$WIZ_CLIENT_SECRET"
+          else
+            wizcli auth
+          fi
 
       - name: Detect changed files for PR scan
         if: ${{ github.event_name == 'pull_request' }}
