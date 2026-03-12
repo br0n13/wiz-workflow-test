@@ -92,20 +92,34 @@ jobs:
         if: ${{ github.event_name == 'pull_request' }}
         run: |
           set -euo pipefail
-          DIRS=$(tr '\n' ' ' < changed_dirs.txt | xargs)
 
-          if [ -z "$DIRS" ]; then
+          if [ ! -s changed_dirs.txt ]; then
             echo "No changed files detected"
             echo '{"findings": []}' > wiz-results.json
             exit 0
           fi
 
-          wizcli scan dir $DIRS \
-            --policy "default vulnerability management" \
-            --format json \
-            --output wiz-results.json \
-            --fail-on-issues false
+          mkdir -p wiz-partials
+          i=0
+          while IFS= read -r dir; do
+            [ -z "$dir" ] && continue
+            i=$((i + 1))
+            output="wiz-partials/wiz-results-${i}.json"
 
+            echo "Scanning directory: $dir"
+            wizcli scan dir "$dir" \
+              --policy "default vulnerability management" \
+              --format json \
+              --output "$output" \
+              --fail-on-issues false
+          done < changed_dirs.txt
+
+          if [ "$i" -eq 0 ]; then
+            echo '{"findings": []}' > wiz-results.json
+            exit 0
+          fi
+
+          jq -s '.' wiz-partials/wiz-results-*.json > wiz-results.json
       - name: Run full Wiz scan for main branch pushes and workflow calls
         if: ${{ github.event_name != 'pull_request' }}
         run: |

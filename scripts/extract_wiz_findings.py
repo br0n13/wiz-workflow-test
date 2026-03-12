@@ -10,8 +10,17 @@ from pathlib import Path
 SEVERITIES = {"HIGH", "CRITICAL"}
 
 
-def load_findings(payload: dict) -> list[dict]:
+def load_findings(payload: dict | list) -> list[dict]:
     """Best-effort extraction across common Wiz JSON shapes."""
+    if isinstance(payload, list):
+        findings: list[dict] = []
+        for entry in payload:
+            findings.extend(load_findings(entry))
+        return findings
+
+    if not isinstance(payload, dict):
+        return []
+
     candidates = [
         payload.get("findings"),
         payload.get("vulnerabilities"),
@@ -21,10 +30,7 @@ def load_findings(payload: dict) -> list[dict]:
 
     for candidate in candidates:
         if isinstance(candidate, list):
-            return candidate
-
-    if isinstance(payload, list):
-        return payload
+            return [item for item in candidate if isinstance(item, dict)]
 
     return []
 
