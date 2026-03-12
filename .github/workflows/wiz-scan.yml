@@ -27,6 +27,8 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Install dependencies
         run: sudo apt-get update && sudo apt-get install -y jq
@@ -46,15 +48,80 @@ jobs:
             --client-id "$WIZ_CLIENT_ID" \
             --client-secret "$WIZ_CLIENT_SECRET"
 
-      - name: Run Wiz scan
+      - name: Fetch base branch
+        if: ${{ github.base_ref != '' }}
+        run: git fetch origin ${{ github.base_ref }}
+
+      - name: Determine changed files
+        id: changed-files
+        shell: bash
         run: |
-          wizcli scan dir "${{ inputs.scan_path }}" \
+          if [ -z "${{ github.base_ref }}" ]; then
+            echo "No base ref available; skipping Wiz scan."
+            : > changed_files.txt
+            echo "has_changed_files=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          git diff --name-only origin/${{ github.base_ref }}...HEAD > changed_files.txt
+
+          echo "Changed files:"
+          cat changed_files.txt
+
+          if [ ! -s changed_files.txt ]; then
+            echo "No changed files detected"
+            echo "has_changed_files=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # Exclude deleted paths so Wiz scans only files that still exist.
+          awk 'NF' changed_files.txt | while IFS= read -r file; do
+            if [ -e "$file" ]; then
+              printf '%s\n' "$file"
+            fi
+          done > scan_targets.txt
+
+          echo "Files selected for scan:"
+          cat scan_targets.txt
+
+          if [ ! -s scan_targets.txt ]; then
+            echo "Changed files are deleted or unavailable; skipping scan."
+            echo "has_changed_files=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "has_changed_files=true" >> "$GITHUB_OUTPUT"
+
+      - name: Run Wiz scan
+        if: ${{ steps.changed-files.outputs.has_changed_files == 'true' }}
+        shell: bash
+        run: |
+          FILES=$(tr '\n' ' ' < scan_targets.txt)
+
+          if [ -z "$FILES" ]; then
+            echo "No changed files detected"
+            exit 0
+          fi
+
+          wizcli scan dir $FILES \
             --policy "default vulnerability management" \
             --format json \
             --output wiz-results.json \
             --fail-on-issues false
 
+      - name: Write skipped-scan outputs
+        if: ${{ steps.changed-files.outputs.has_changed_files != 'true' }}
+        run: |
+          echo '{"scan":"skipped","reason":"No changed files detected for this pull request."}' > wiz-results.json
+          echo '[]' > filtered-findings.json
+          cat > wiz-pr-comment.md <<'EOF'
+          ## Wiz Security Scan Results
+
+          No changed files detected in this pull request. Wiz scan was skipped.
+          EOF
+
       - name: Extract High and Critical findings
+        if: ${{ steps.changed-files.outputs.has_changed_files == 'true' }}
         run: |
           python3 scripts/extract_wiz_findings.py \
             --input wiz-results.json \
