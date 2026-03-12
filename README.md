@@ -1,4 +1,4 @@
-# Wiz Security Scanning Platform
+# wiz-workflow-test
 
 ## Overview
 
