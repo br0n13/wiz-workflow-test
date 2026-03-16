@@ -1,0 +1,99 @@
+name: Wiz CLI Scan
+
+description: Install Wiz CLI and scan changed files using the North vulnerabilities scanning policy.
+
+inputs:
+  files:
+    description: Newline-delimited list of file paths to scan.
+    required: true
+  policy:
+    description: Wiz policy name.
+    required: false
+    default: North vulnerabilities scanning
+  output-file:
+    description: Output file for Wiz JSON results.
+    required: false
+    default: wiz-results.json
+
+outputs:
+  output-file:
+    description: Path to the generated Wiz JSON results file.
+    value: ${{ steps.scan.outputs.output_file }}
+
+runs:
+  using: composite
+  steps:
+    - name: Install Wiz CLI
+      shell: bash
+      run: |
+        set -euo pipefail
+        arch="$(uname -m)"
+        case "$arch" in
+          x86_64) wiz_arch="amd64" ;;
+          aarch64|arm64) wiz_arch="arm64" ;;
+          *)
+            echo "Unsupported architecture: $arch"
+            exit 1
+            ;;
+        esac
+
+        curl -fsSL "https://downloads.wiz.io/wizcli/latest/wizcli-linux-${wiz_arch}" -o wiz
+        chmod +x wiz
+        install_dir="$HOME/.local/bin"
+        mkdir -p "$install_dir"
+        mv wiz "$install_dir/wiz"
+        echo "$install_dir" >> "$GITHUB_PATH"
+        "$install_dir/wiz" version
+
+    - name: Build scoped scan workspace
+      id: scope
+      shell: bash
+      run: |
+        set -euo pipefail
+
+        workspace=".wiz-scan-scope"
+        rm -rf "$workspace"
+        mkdir -p "$workspace"
+
+        files_payload='${{ inputs.files }}'
+
+        while IFS= read -r file; do
+          [[ -z "$file" ]] && continue
+          [[ ! -f "$file" ]] && continue
+
+          target_dir="$workspace/$(dirname "$file")"
+          mkdir -p "$target_dir"
+          cp "$file" "$workspace/$file"
+        done <<< "$files_payload"
+
+        echo "scope_dir=$workspace" >> "$GITHUB_OUTPUT"
+
+    - name: Run Wiz scan
+      id: scan
+      shell: bash
+      env:
+        WIZ_CLIENT_ID: ${{ env.WIZ_CLIENT_ID }}
+        WIZ_CLIENT_SECRET: ${{ env.WIZ_CLIENT_SECRET }}
+      run: |
+        set -euo pipefail
+
+        output_file='${{ inputs.output-file }}'
+        scope_dir='${{ steps.scope.outputs.scope_dir }}'
+
+        if [[ -z "$WIZ_CLIENT_ID" || -z "$WIZ_CLIENT_SECRET" ]]; then
+          echo "WIZ_CLIENT_ID and WIZ_CLIENT_SECRET must be set"
+          exit 1
+        fi
+
+        if [[ ! -d "$scope_dir" ]] || [[ -z "$(find "$scope_dir" -type f -print -quit)" ]]; then
+          echo '{"findings": []}' > "$output_file"
+          echo "output_file=$output_file" >> "$GITHUB_OUTPUT"
+          exit 0
+        fi
+
+        wiz scan directory "$scope_dir" \
+          --policy "${{ inputs.policy }}" \
+          --output "$output_file" \
+          --format json
+
+        echo "output_file=$output_file" >> "$GITHUB_OUTPUT"
