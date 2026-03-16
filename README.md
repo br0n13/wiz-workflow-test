@@ -1,138 +1,104 @@
-# Wiz Reusable GitHub Actions Security Scanning
+# wiz-north-scan
 
-## Overview
-This repository provides a reusable GitHub Actions workflow that runs Wiz CLI scans for software vulnerabilities and security issues across repositories. It is optimized for fast pull request feedback and complete coverage on the `main` branch.
+Reusable GitHub CI/CD security scanning integration that runs Wiz CLI for pull requests, compares baseline and PR findings, and reports only newly introduced vulnerabilities under the **North vulnerabilities scanning** policy.
 
-> **Important:** Wiz CLI authentication must be supplied directly in each `wizcli scan dir` command via `--client-id` and `--client-secret`. The legacy `wizcli auth` command is deprecated and must never be used.
+## What this repository does
 
-## Architecture
-The platform is implemented as a reusable workflow:
+This repository provides a reusable workflow and composite action that other repositories can call directly. It is designed for centralized, production-grade PR security scanning with:
 
-- Workflow file: `.github/workflows/wiz-scan.yml`
-- Trigger model: `on: workflow_call`
-- Consumer repositories call this workflow and pass Wiz secrets.
+- Wiz CLI execution only.
+- Explicit CLI credential flags (`--client-id`, `--client-secret`) and no `wiz auth`.
+- Policy enforcement for **North vulnerabilities scanning**.
+- Baseline-vs-PR differential detection.
+- Single deduplicated PR comment updates.
+- Optional failure gate only when new findings are introduced.
 
-This design centralizes scanning logic while allowing many repositories to share the same secure scanning implementation.
+## Architecture overview
 
-## Scanning Strategy
-The workflow supports two execution paths:
+- **Reusable workflow** (`.github/workflows/wiz-scan.yml`): Orchestrates checkout, diffing, scope derivation, baseline scan, PR scan, result diffing, summary generation, and PR comment management.
+- **Composite action** (`actions/wiz-cli/action.yml`): Installs Wiz CLI and executes the scan command with explicit client credentials passed as flags.
+- **Python scripts** (`scripts/*.py`):
+  - `build_scan_scope.py`: derives scan target scope from changed files.
+  - `diff_results.py`: computes newly introduced findings only.
+  - `summarize_results.py`: creates `summary.json` and `summary.md`.
+  - `post_pr_comment.py`: creates/updates one marker-based PR comment.
 
-1. **Pull request differential scanning**
-   - Detect changed files from base/head SHAs.
-   - Ignore deleted files.
-   - Include modified, added, and renamed file targets.
-   - Convert file paths to unique directories.
-   - Scan only those directories.
-
-2. **Full repository scanning on main**
-   - For `push` events on `main`, scan the entire repository (`.`).
-   - Upload full `wiz-results.json` as an artifact.
-
-## PR Differential Scanning
-For pull requests, the workflow:
-
-1. Fetches the PR base commit.
-2. Runs:
-   - `git diff --name-status <BASE_SHA> <HEAD_SHA>`
-3. Applies status handling:
-   - `M` (modified): include
-   - `A` (added): include
-   - `R` (renamed): include **new** path
-   - `D` (deleted): ignore
-4. Writes included files to `changed_files.txt`.
-5. Converts files to directories in `changed_dirs.txt`.
-6. Adds `.` if root dependency/build files changed:
-   - `Dockerfile`
-   - `package.json`
-   - `requirements.txt`
-   - `go.mod`
-   - `pom.xml`
-   - `pyproject.toml`
-
-If no scan targets remain, the workflow exits scanning gracefully with an empty results payload.
-
-## Full Repo Scanning
-For pushes to `main`, the workflow runs:
-
-```bash
-wizcli scan dir . \
-  --client-id "$WIZ_CLIENT_ID" \
-  --client-secret "$WIZ_CLIENT_SECRET" \
-  --format json \
-  --output wiz-results.json \
-  --fail-on-issues false
-```
-
-This ensures full coverage for baseline and compliance reporting.
-
-## Performance Optimization
-The workflow reduces runtime and cost by:
-
-- Scanning only changed directories in pull requests.
-- Automatically including root scan only when critical root files change.
-- Avoiding full-repo scans for standard PR validation.
-- Using reusable workflow architecture for consistent behavior.
-
-## Setup Instructions
-1. Add this repository workflow as the reusable source.
-2. In each consuming repository, create a caller workflow that triggers on PR and push events.
-3. Pass required secrets to the reusable workflow.
-
-## Secrets Configuration
-Configure these repository or organization secrets in every consuming repository:
-
-- `WIZ_CLIENT_ID`
-- `WIZ_CLIENT_SECRET`
-
-The reusable workflow requires both secrets through `workflow_call`.
-
-## Reusable Workflow Usage
-The reusable workflow has:
-
-- `on: workflow_call`
-- Required permissions:
-  - `contents: read`
-  - `pull-requests: write`
-  - `checks: write`
-- Concurrency:
-  - `group: wiz-main-scan`
-  - `cancel-in-progress: true`
-
-## Example Integration
-Example caller workflow in a consuming repository:
+## How repositories consume the reusable workflow
 
 ```yaml
-name: Repository Security Scan
+name: Security Scan
 
 on:
   pull_request:
-    branches: [main]
-  push:
-    branches: [main]
 
 jobs:
-  wiz:
-    uses: your-org/wiz-workflow-test/.github/workflows/wiz-scan.yml@main
+  security-scan:
+    uses: org-name/wiz-north-scan/.github/workflows/wiz-scan.yml@main
     secrets:
       WIZ_CLIENT_ID: ${{ secrets.WIZ_CLIENT_ID }}
       WIZ_CLIENT_SECRET: ${{ secrets.WIZ_CLIENT_SECRET }}
 ```
 
-## Example PR Output
-When HIGH/CRITICAL findings exist, the workflow posts a markdown comment with real Wiz findings in a table, for example:
+## Required secrets
 
-```markdown
-| Severity | Vulnerability | Package | Version |
-|----------|---------------|---------|---------|
-| CRITICAL | CVE-2024-XXXX | openssl | 1.1.1 |
-| HIGH     | CVE-2023-YYYY | lodash  | 4.17.15 |
+- `WIZ_CLIENT_ID`
+- `WIZ_CLIENT_SECRET`
+
+These secrets are passed to Wiz CLI as explicit command-line flags.
+
+## Supported triggers
+
+The workflow supports:
+
+- `pull_request`
+- `workflow_dispatch`
+- `workflow_call`
+
+## PR-focused scan scoping
+
+1. Workflow computes changed files via `git diff --name-status base..head`.
+2. `build_scan_scope.py` removes deleted entries, normalizes paths, and picks best scope:
+   - `files` mode when safe and sufficiently narrow.
+   - `directories` mode when file-based scope is too broad.
+   - `repo` mode fallback (`.`) when scope cannot be safely narrowed.
+
+## Baseline-aware differential scanning
+
+1. Workflow checks out base commit and runs baseline scan.
+2. Workflow checks out PR head commit and runs PR scan.
+3. `diff_results.py` normalizes/deduplicates findings and outputs only findings present in PR results but not baseline results.
+
+## Deduplicated PR comments
+
+`post_pr_comment.py` searches PR comments for this marker:
+
+```md
+<!-- WIZ-NORTH-SCAN -->
 ```
 
-To minimize PR noise, no comment is posted when no HIGH/CRITICAL findings are present.
+- If found, it updates the existing comment.
+- If not found, it creates one new comment.
+- If no PR number exists (e.g., `workflow_dispatch`), it exits successfully without posting.
 
-## Troubleshooting
-- **No PR scan executed:** confirm event is `pull_request` and the caller workflow uses this reusable workflow.
-- **No findings comment:** expected when no HIGH/CRITICAL findings exist.
-- **Scan failed authentication:** verify `WIZ_CLIENT_ID` and `WIZ_CLIENT_SECRET` are set and valid.
-- **Missing artifact:** verify the job reached artifact upload and did not fail earlier.
-- **Deprecated command usage:** remove any `wizcli auth` references from caller workflows or custom scripts.
+## fail-on-issues behavior
+
+Input: `fail-on-issues` (default `false`)
+
+- `false`: workflow never fails because of findings.
+- `true`: workflow fails only when `total_new_findings > 0`.
+
+## Artifacts generated
+
+- `baseline-results.json`
+- `pr-results.json`
+- `new-findings.json`
+- `summary.json`
+- `summary.md`
+- `changed_files.txt`
+- `scan-scope.json`
+
+## Adjusting Wiz CLI command syntax
+
+The architecture is intentionally stable even if Wiz CLI syntax evolves.
+
+If your Wiz tenant/version requires different scan flags, update **only** command assembly in `actions/wiz-cli/action.yml` (the `WIZ_SCAN_SUBCOMMAND` and argument section). This lets you tune exact CLI options without redesigning the reusable workflow, scripts, or repository contract.

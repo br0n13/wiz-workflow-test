@@ -1,7 +1,38 @@
-name: Reusable Wiz Security Scan
+name: Wiz North Vulnerability Scan
 
 on:
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      fail-on-issues:
+        description: 'Fail only when NEW findings are introduced'
+        required: false
+        default: 'false'
+        type: boolean
+      base-ref:
+        description: 'Base reference to compare against for manual runs'
+        required: false
+        default: 'main'
+        type: string
+      scan-mode:
+        description: 'Scan mode override: auto/files/directories/repo'
+        required: false
+        default: 'auto'
+        type: string
   workflow_call:
+    inputs:
+      fail-on-issues:
+        required: false
+        default: false
+        type: boolean
+      base-ref:
+        required: false
+        default: main
+        type: string
+      scan-mode:
+        required: false
+        default: auto
+        type: string
     secrets:
       WIZ_CLIENT_ID:
         required: true
@@ -11,160 +42,164 @@ on:
 permissions:
   contents: read
   pull-requests: write
-  checks: write
-
-concurrency:
-  group: wiz-main-scan
-  cancel-in-progress: true
 
 jobs:
   wiz-scan:
-    name: Wiz CLI scan
     runs-on: ubuntu-latest
-
+    env:
+      POLICY_NAME: North vulnerabilities scanning
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      - name: Install Wiz CLI
-        run: |
-          curl -Lo wizcli https://downloads.wiz.io/v1/wizcli/latest/wizcli-linux-amd64
-          chmod +x wizcli
-          sudo mv wizcli /usr/local/bin/
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
 
-      - name: Detect changed files for PR differential scan
-        id: detect_changes
-        if: ${{ github.event_name == 'pull_request' }}
-        env:
-          BASE_SHA: ${{ github.event.pull_request.base.sha }}
-          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+      - name: Resolve refs and inputs
+        id: refs
+        shell: bash
         run: |
           set -euo pipefail
 
-          git fetch --no-tags origin "$BASE_SHA"
-          git diff --name-status "$BASE_SHA" "$HEAD_SHA" > changed_files_raw.txt
-
-          : > changed_files.txt
-          while IFS=$'\t' read -r status path1 path2; do
-            case "$status" in
-              M|A)
-                if [ -n "${path1:-}" ]; then
-                  echo "$path1" >> changed_files.txt
-                fi
-                ;;
-              R*)
-                if [ -n "${path2:-}" ]; then
-                  echo "$path2" >> changed_files.txt
-                fi
-                ;;
-              D)
-                ;;
-            esac
-          done < changed_files_raw.txt
-
-          sort -u changed_files.txt -o changed_files.txt || true
-
-          if [ ! -s changed_files.txt ]; then
-            echo "No changed files detected for PR scan"
-            echo "[]" > changed_dirs.txt
-            echo '{"findings":[]}' > wiz-results.json
-            echo "has_dirs=false" >> "$GITHUB_OUTPUT"
-            exit 0
+          if [ "${GITHUB_EVENT_NAME}" = "pull_request" ]; then
+            BASE_SHA="${{ github.event.pull_request.base.sha }}"
+            HEAD_SHA="${{ github.event.pull_request.head.sha }}"
+            PR_NUMBER="${{ github.event.pull_request.number }}"
+          else
+            BASE_REF="${{ inputs.base-ref || 'main' }}"
+            git fetch origin "${BASE_REF}" --depth=1
+            BASE_SHA="$(git rev-parse "origin/${BASE_REF}")"
+            HEAD_SHA="${GITHUB_SHA}"
+            PR_NUMBER=""
           fi
 
-          xargs -a changed_files.txt -I{} dirname "{}" | sort -u > changed_dirs.txt
+          FAIL_ON_ISSUES="${{ inputs.fail-on-issues || false }}"
+          SCAN_MODE="${{ inputs.scan-mode || 'auto' }}"
 
-          while IFS= read -r file; do
-            case "$file" in
-              Dockerfile|package.json|requirements.txt|go.mod|pom.xml|pyproject.toml)
-                echo "." >> changed_dirs.txt
-                ;;
-            esac
-          done < changed_files.txt
+          echo "base_sha=${BASE_SHA}" >> "$GITHUB_OUTPUT"
+          echo "head_sha=${HEAD_SHA}" >> "$GITHUB_OUTPUT"
+          echo "pr_number=${PR_NUMBER}" >> "$GITHUB_OUTPUT"
+          echo "fail_on_issues=${FAIL_ON_ISSUES}" >> "$GITHUB_OUTPUT"
+          echo "scan_mode=${SCAN_MODE}" >> "$GITHUB_OUTPUT"
 
-          sort -u changed_dirs.txt -o changed_dirs.txt
-
-          if [ ! -s changed_dirs.txt ]; then
-            echo "No changed directories detected for PR scan"
-            echo '{"findings":[]}' > wiz-results.json
-            echo "has_dirs=false" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-
-          echo "has_dirs=true" >> "$GITHUB_OUTPUT"
-
-      - name: Run PR differential Wiz scan
-        if: ${{ github.event_name == 'pull_request' && steps.detect_changes.outputs.has_dirs == 'true' }}
-        env:
-          WIZ_CLIENT_ID: ${{ secrets.WIZ_CLIENT_ID }}
-          WIZ_CLIENT_SECRET: ${{ secrets.WIZ_CLIENT_SECRET }}
+      - name: Build changed file list
+        shell: bash
         run: |
           set -euo pipefail
-          mapfile -t DIR_ARRAY < changed_dirs.txt
+          git diff --name-status "${{ steps.refs.outputs.base_sha }}" "${{ steps.refs.outputs.head_sha }}" > changed_files.txt
+          echo "Changed files:"
+          cat changed_files.txt || true
 
-          if [ "${#DIR_ARRAY[@]}" -eq 0 ]; then
-            echo "No changed directories detected"
-            echo '{"findings":[]}' > wiz-results.json
-            exit 0
-          fi
+      - name: Derive scan scope
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/build_scan_scope.py \
+            --changed-files changed_files.txt \
+            --output scan-scope.json
+          cat scan-scope.json
 
-          wizcli scan dir "${DIR_ARRAY[@]}" \
-            --client-id "$WIZ_CLIENT_ID" \
-            --client-secret "$WIZ_CLIENT_SECRET" \
-            --policy "default vulnerability scanning" \
-            --format json \
-            --output wiz-results.json \
-            --fail-on-issues false
+      - name: Checkout base branch state
+        shell: bash
+        run: |
+          set -euo pipefail
+          git checkout --force "${{ steps.refs.outputs.base_sha }}"
 
-      - name: Run full repository Wiz scan on main
-        if: ${{ github.event_name == 'push' && github.ref_name == 'main' }}
+      - name: Baseline scan
+        uses: ./actions/wiz-cli
+        with:
+          scan-target: scan-scope.json
+          policy-name: ${{ env.POLICY_NAME }}
+          output-file: baseline-results.json
+          scan-mode: ${{ steps.refs.outputs.scan_mode }}
         env:
           WIZ_CLIENT_ID: ${{ secrets.WIZ_CLIENT_ID }}
           WIZ_CLIENT_SECRET: ${{ secrets.WIZ_CLIENT_SECRET }}
-        run: |
-          wizcli scan dir . \
-            --client-id "$WIZ_CLIENT_ID" \
-            --client-secret "$WIZ_CLIENT_SECRET" \
-            --policy "default vulnerability scanning" \
-            --format json \
-            --output wiz-results.json \
-            --fail-on-issues false
 
-      - name: Ensure Wiz results file exists
+      - name: Checkout PR head state
+        shell: bash
         run: |
-          if [ ! -f wiz-results.json ]; then
-            echo '{"findings":[]}' > wiz-results.json
-          fi
+          set -euo pipefail
+          git checkout --force "${{ steps.refs.outputs.head_sha }}"
 
-      - name: Extract HIGH and CRITICAL findings
+      - name: PR scan
+        uses: ./actions/wiz-cli
+        with:
+          scan-target: scan-scope.json
+          policy-name: ${{ env.POLICY_NAME }}
+          output-file: pr-results.json
+          scan-mode: ${{ steps.refs.outputs.scan_mode }}
+        env:
+          WIZ_CLIENT_ID: ${{ secrets.WIZ_CLIENT_ID }}
+          WIZ_CLIENT_SECRET: ${{ secrets.WIZ_CLIENT_SECRET }}
+
+      - name: Diff baseline vs PR results
+        shell: bash
         run: |
-          python3 scripts/extract_wiz_findings.py \
-            --input wiz-results.json \
-            --output filtered-findings.json \
-            --markdown wiz-pr-comment.md
+          set -euo pipefail
+          python3 scripts/diff_results.py \
+            --baseline baseline-results.json \
+            --pr pr-results.json \
+            --output new-findings.json
 
-      - name: Count findings
-        id: findings_count
-        if: ${{ github.event_name == 'pull_request' }}
+      - name: Build human and machine summaries
+        shell: bash
         run: |
-          count=$(python3 -c 'import json; print(len(json.load(open("filtered-findings.json", encoding="utf-8"))))')
-          echo "count=$count" >> "$GITHUB_OUTPUT"
+          set -euo pipefail
+          python3 scripts/summarize_results.py \
+            --input new-findings.json \
+            --summary-json summary.json \
+            --summary-md summary.md \
+            --policy-name "${POLICY_NAME}"
+          cat summary.md
 
-      - name: Post findings to pull request
-        if: ${{ github.event_name == 'pull_request' && steps.findings_count.outputs.count != '0' }}
+      - name: Create or update pull request comment
+        shell: bash
         env:
           GITHUB_TOKEN: ${{ github.token }}
           GITHUB_REPOSITORY: ${{ github.repository }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_NUMBER: ${{ steps.refs.outputs.pr_number }}
         run: |
-          python3 scripts/generate_pr_comment.py \
-            --comment-file wiz-pr-comment.md
+          set -euo pipefail
+          python3 scripts/post_pr_comment.py \
+            --summary-md summary.md
 
-      - name: Upload Wiz JSON report
+      - name: Upload scan artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: wiz-results
-          path: wiz-results.json
-          if-no-files-found: error
+          name: wiz-scan-artifacts
+          path: |
+            baseline-results.json
+            pr-results.json
+            new-findings.json
+            summary.json
+            summary.md
+            changed_files.txt
+            scan-scope.json
+
+      - name: Enforce fail-on-issues gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "${{ steps.refs.outputs.fail_on_issues }}" != "true" ]; then
+            echo "fail-on-issues disabled; not failing workflow on findings."
+            exit 0
+          fi
+
+          total_new="$(python3 - <<'PY'
+import json
+with open('summary.json', 'r', encoding='utf-8') as f:
+    print(int(json.load(f).get('total_new_findings', 0)))
+PY
+)"
+
+          if [ "${total_new}" -gt 0 ]; then
+            echo "Failing build because fail-on-issues=true and ${total_new} new finding(s) were introduced."
+            exit 1
+          fi
+
+          echo "No new findings; gate passed."
