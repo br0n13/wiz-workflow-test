@@ -1,74 +1,92 @@
 #!/usr/bin/env python3
-"""Generate markdown and JSON summaries from new findings."""
-
-from __future__ import annotations
-
 import argparse
 import json
 from pathlib import Path
 from typing import Any
 
-SEVERITIES = ["critical", "high", "medium", "low", "informational"]
+
+SEVERITY_ICON = {
+    "critical": "🔴",
+    "high": "🟠",
+    "medium": "🟡",
+    "low": "🟢",
+}
 
 
-def read_payload(path: Path) -> dict[str, Any]:
-    if not path.exists():
-        return {"counts_by_severity": {}, "total_new_findings": 0, "findings": []}
-    return json.loads(path.read_text(encoding="utf-8"))
+def load(path: str) -> dict[str, Any]:
+    p = Path(path)
+    if not p.exists() or p.stat().st_size == 0:
+        return {}
+    try:
+        return json.loads(p.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+
+def norm(value: Any) -> str:
+    if value is None:
+        return "N/A"
+    text = str(value).strip()
+    return text if text else "N/A"
+
+
+def extract(item: dict[str, Any]) -> dict[str, str]:
+    severity_raw = norm(item.get("severity") or item.get("Severity") or "N/A")
+    sev_key = severity_raw.lower()
+    icon = SEVERITY_ICON.get(sev_key, "⚪")
+    return {
+        "severity": f"{icon} {severity_raw}",
+        "cve": norm(item.get("cve") or item.get("CVE") or item.get("id")),
+        "cvss": norm(item.get("cvss") or item.get("CVSS") or item.get("score")),
+        "package": norm(item.get("package") or item.get("packageName") or item.get("name")),
+        "installed": norm(item.get("installed") or item.get("installedVersion") or item.get("version")),
+        "fixed": norm(item.get("fixed") or item.get("fixedVersion")),
+        "file": norm(item.get("file") or item.get("path") or item.get("location")),
+    }
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Summarize new Wiz findings.")
+    parser = argparse.ArgumentParser()
     parser.add_argument("--input", required=True)
     parser.add_argument("--summary-json", required=True)
     parser.add_argument("--summary-md", required=True)
-    parser.add_argument("--policy-name", required=True)
     args = parser.parse_args()
 
-    payload = read_payload(Path(args.input))
-    findings = payload.get("findings", []) or []
-    incoming_counts = payload.get("counts_by_severity", {}) or {}
+    data = load(args.input)
+    items = data.get("new_findings", []) if isinstance(data, dict) else []
+    top = [extract(i) for i in items[:10] if isinstance(i, dict)]
 
-    counts = {sev: int(incoming_counts.get(sev, 0)) for sev in SEVERITIES}
-    total = int(payload.get("total_new_findings", len(findings)))
-
-    top_findings = findings[:10]
-
-    summary_obj = {
-        "policy": args.policy_name,
-        "total_new_findings": total,
-        "counts": counts,
-        "top_findings": top_findings,
+    summary = {
+        "policy": "North vulnerabilities scanning",
+        "total_new_findings": len(items),
+        "displayed_findings": len(top),
+        "table_headers": ["Severity", "CVE", "CVSS", "Package", "Installed", "Fixed", "File"],
     }
+    Path(args.summary_json).write_text(json.dumps(summary, indent=2), encoding="utf-8")
 
     lines = [
-        "## Wiz Security Scan Results",
+        "## Wiz Scan (Informational Only)",
+        "Policy enforced: `North vulnerabilities scanning`",
         "",
-        f"**Policy:** {args.policy_name}",
+        f"New findings vs baseline: **{len(items)}**",
         "",
-        "### Summary",
-        f"- Critical: {counts['critical']}",
-        f"- High: {counts['high']}",
-        f"- Medium: {counts['medium']}",
-        f"- Low: {counts['low']}",
-        f"- Informational: {counts['informational']}",
-        "",
-        "### New Findings Introduced by This PR",
+        "| Severity | CVE | CVSS | Package | Installed | Fixed | File |",
+        "| --- | --- | --- | --- | --- | --- | --- |",
     ]
 
-    if total == 0:
-        lines.append("✅ No new vulnerabilities introduced by this PR were detected under the configured Wiz policy.")
+    if top:
+        for row in top:
+            lines.append(
+                f"| {row['severity']} | {row['cve']} | {row['cvss']} | {row['package']} | {row['installed']} | {row['fixed']} | {row['file']} |"
+            )
     else:
-        for idx, finding in enumerate(top_findings, 1):
-            sev = str(finding.get("severity", "unknown")).capitalize()
-            title = finding.get("title", "Untitled finding")
-            path = finding.get("path") or "."
-            line = finding.get("line")
-            location = f"{path}:{line}" if line is not None else path
-            lines.append(f"{idx}. {sev} - {title} - {location}")
+        lines.append("| N/A | N/A | N/A | N/A | N/A | N/A | N/A |")
 
-    Path(args.summary_json).write_text(json.dumps(summary_obj, indent=2) + "\n", encoding="utf-8")
+    lines.append("")
+    lines.append("_This scan is informational only and never fails the build._")
+
     Path(args.summary_md).write_text("\n".join(lines) + "\n", encoding="utf-8")
+    print(f"Wrote summary outputs to {args.summary_json} and {args.summary_md}")
     return 0
 
 
