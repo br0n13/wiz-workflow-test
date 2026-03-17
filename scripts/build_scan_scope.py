@@ -8,11 +8,6 @@ import json
 from pathlib import Path
 from typing import Iterable
 
-TEXT_EXTENSIONS = {
-    ".py", ".js", ".ts", ".tsx", ".jsx", ".go", ".java", ".kt", ".rb", ".php", ".cs",
-    ".tf", ".tfvars", ".yml", ".yaml", ".json", ".xml", ".sh", ".dockerfile", ".gradle",
-}
-
 
 def normalize_changed_paths(lines: Iterable[str]) -> list[str]:
     paths: list[str] = []
@@ -20,69 +15,42 @@ def normalize_changed_paths(lines: Iterable[str]) -> list[str]:
         line = raw.strip()
         if not line:
             continue
-
         parts = line.split("\t")
-        if len(parts) == 1:
-            status, path = "M", parts[0]
-        else:
-            status, path = parts[0], parts[-1]
-
+        status = parts[0] if parts else "M"
+        path = parts[-1] if len(parts) > 1 else status
         if status.startswith("D"):
             continue
-
-        p = Path(path)
-        if p.is_absolute():
-            p = Path(*p.parts[1:])
-        normalized = p.as_posix().strip()
-
+        normalized = Path(path).as_posix().strip().lstrip("/")
         if normalized and normalized != ".":
             paths.append(normalized)
-
     return sorted(set(paths))
 
 
-def derive_directories(paths: list[str]) -> list[str]:
-    dirs = set()
-    for path in paths:
-        parent = Path(path).parent.as_posix()
-        dirs.add("." if parent == "" else parent)
-    return sorted(dirs)
-
-
-def choose_mode(paths: list[str]) -> dict:
+def choose_mode(paths: list[str]) -> dict[str, list[str] | str]:
     if not paths:
         return {"mode": "repo", "targets": ["."]}
-
-    file_like = [p for p in paths if Path(p).suffix.lower() in TEXT_EXTENSIONS]
-
-    if file_like and len(file_like) <= 100:
-        return {"mode": "files", "targets": file_like}
-
-    dirs = derive_directories(paths)
-
-    if len(dirs) == 1 and dirs[0] == ".":
-        return {"mode": "repo", "targets": ["."]}
-
-    if len(dirs) <= 25:
-        return {"mode": "directories", "targets": dirs}
-
+    if len(paths) <= 100:
+        return {"mode": "files", "targets": paths}
+    directories = sorted({Path(p).parent.as_posix() or "." for p in paths})
+    if len(directories) <= 25:
+        return {"mode": "directories", "targets": directories}
     return {"mode": "repo", "targets": ["."]}
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Build Wiz scan scope from changed_files.txt")
-    parser.add_argument("--changed-files", required=True, help="Path to git diff output")
-    parser.add_argument("--output", required=True, help="Path to output scan-scope.json")
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--changed-files", required=True)
+    parser.add_argument("--output", required=True)
     args = parser.parse_args()
 
-    changed_file_path = Path(args.changed_files)
-    lines = changed_file_path.read_text(encoding="utf-8").splitlines() if changed_file_path.exists() else []
+    try:
+        changed = Path(args.changed_files)
+        lines = changed.read_text(encoding="utf-8").splitlines() if changed.exists() else []
+        scope = choose_mode(normalize_changed_paths(lines))
+    except Exception:
+        scope = {"mode": "repo", "targets": ["."]}
 
-    paths = normalize_changed_paths(lines)
-    scope = choose_mode(paths)
-
-    out_path = Path(args.output)
-    out_path.write_text(json.dumps(scope, indent=2) + "\n", encoding="utf-8")
+    Path(args.output).write_text(json.dumps(scope, indent=2) + "\n", encoding="utf-8")
     return 0
 
 

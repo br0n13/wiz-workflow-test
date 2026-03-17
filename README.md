@@ -1,104 +1,98 @@
 # wiz-north-scan
 
-Reusable GitHub CI/CD security scanning integration that runs Wiz CLI for pull requests, compares baseline and PR findings, and reports only newly introduced vulnerabilities under the **North vulnerabilities scanning** policy.
+Production-grade reusable GitHub Actions integration for **informational** Wiz vulnerability scanning.
 
-## What this repository does
+This repository scans pull request changes, enforces the hardcoded Wiz policy **"North vulnerabilities scanning"**, performs baseline-aware differential analysis, and posts a markdown table comment with enriched CVE metadata.
 
-This repository provides a reusable workflow and composite action that other repositories can call directly. It is designed for centralized, production-grade PR security scanning with:
+## Repository structure
 
-- Wiz CLI execution only.
-- Explicit CLI credential flags (`--client-id`, `--client-secret`) and no `wiz auth`.
-- Policy enforcement for **North vulnerabilities scanning**.
-- Baseline-vs-PR differential detection.
-- Single deduplicated PR comment updates.
-- Optional failure gate only when new findings are introduced.
+```text
+wiz-north-scan
+├── actions
+│   └── wiz-cli
+│       └── action.yml
+├── .github
+│   └── workflows
+│       └── wiz-scan.yml
+├── scripts
+│   ├── build_scan_scope.py
+│   ├── diff_results.py
+│   ├── summarize_results.py
+│   └── post_pr_comment.py
+└── README.md
+```
 
-## Architecture overview
+## Key guarantees
 
-- **Reusable workflow** (`.github/workflows/wiz-scan.yml`): Orchestrates checkout, diffing, scope derivation, baseline scan, PR scan, result diffing, summary generation, and PR comment management.
-- **Composite action** (`actions/wiz-cli/action.yml`): Installs Wiz CLI and executes the scan command with explicit client credentials passed as flags.
-- **Python scripts** (`scripts/*.py`):
-  - `build_scan_scope.py`: derives scan target scope from changed files.
-  - `diff_results.py`: computes newly introduced findings only.
-  - `summarize_results.py`: creates `summary.json` and `summary.md`.
-  - `post_pr_comment.py`: creates/updates one marker-based PR comment.
+- **Informational only:** scans never fail the workflow.
+- **Wiz auth mode:** only `--client-id` and `--client-secret` are used.
+- **Hardcoded policy:** all scans always run with `--policy "North vulnerabilities scanning"`.
+- **PR diffing:** only vulnerabilities newly introduced in the PR are reported.
+- **Top 10 table output:** severity icon, CVE, CVSS, package, installed/fixed versions, and file path.
 
-## How repositories consume the reusable workflow
+## Secrets setup
+
+Configure these repository or organization secrets in the caller repository:
+
+- `WIZ_CLIENT_ID`
+- `WIZ_CLIENT_SECRET`
+
+## Integration instructions
+
+Use the reusable workflow from another repository:
 
 ```yaml
-name: Security Scan
+name: Wiz Security Scan
 
 on:
   pull_request:
 
 jobs:
-  security-scan:
-    uses: org-name/wiz-north-scan/.github/workflows/wiz-scan.yml@main
+  wiz:
+    uses: your-org/wiz-north-scan/.github/workflows/wiz-scan.yml@main
     secrets:
       WIZ_CLIENT_ID: ${{ secrets.WIZ_CLIENT_ID }}
       WIZ_CLIENT_SECRET: ${{ secrets.WIZ_CLIENT_SECRET }}
 ```
 
-## Required secrets
-
-- `WIZ_CLIENT_ID`
-- `WIZ_CLIENT_SECRET`
-
-These secrets are passed to Wiz CLI as explicit command-line flags.
-
-## Supported triggers
-
-The workflow supports:
+Supported triggers in the reusable workflow:
 
 - `pull_request`
 - `workflow_dispatch`
 - `workflow_call`
 
-## PR-focused scan scoping
+For `workflow_dispatch`, the workflow compares against `main` by default and skips PR commenting when no PR exists.
 
-1. Workflow computes changed files via `git diff --name-status base..head`.
-2. `build_scan_scope.py` removes deleted entries, normalizes paths, and picks best scope:
-   - `files` mode when safe and sufficiently narrow.
-   - `directories` mode when file-based scope is too broad.
-   - `repo` mode fallback (`.`) when scope cannot be safely narrowed.
+## Output format
 
-## Baseline-aware differential scanning
-
-1. Workflow checks out base commit and runs baseline scan.
-2. Workflow checks out PR head commit and runs PR scan.
-3. `diff_results.py` normalizes/deduplicates findings and outputs only findings present in PR results but not baseline results.
-
-## Deduplicated PR comments
-
-`post_pr_comment.py` searches PR comments for this marker:
+The PR comment body starts with:
 
 ```md
 <!-- WIZ-NORTH-SCAN -->
 ```
 
-- If found, it updates the existing comment.
-- If not found, it creates one new comment.
-- If no PR number exists (e.g., `workflow_dispatch`), it exits successfully without posting.
+Then includes:
 
-## fail-on-issues behavior
+- `Policy: North vulnerabilities scanning`
+- Severity counts (Critical, High, Medium, Low)
+- A markdown table with up to top 10 new findings
 
-Input: `fail-on-issues` (default `false`)
+If no new vulnerabilities are introduced:
 
-- `false`: workflow never fails because of findings.
-- `true`: workflow fails only when `total_new_findings > 0`.
+```md
+✅ No new vulnerabilities introduced by this PR
+```
 
-## Artifacts generated
+## CVE and metadata enrichment
 
-- `baseline-results.json`
-- `pr-results.json`
-- `new-findings.json`
-- `summary.json`
-- `summary.md`
-- `changed_files.txt`
-- `scan-scope.json`
+`diff_results.py` preserves enriched vulnerability fields whenever available:
 
-## Adjusting Wiz CLI command syntax
+- CVE ID
+- CVSS score
+- package name
+- installed version
+- fixed version
+- file path
+- severity
 
-The architecture is intentionally stable even if Wiz CLI syntax evolves.
-
-If your Wiz tenant/version requires different scan flags, update **only** command assembly in `actions/wiz-cli/action.yml` (the `WIZ_SCAN_SUBCOMMAND` and argument section). This lets you tune exact CLI options without redesigning the reusable workflow, scripts, or repository contract.
+Missing values are normalized to `N/A` for clean table rendering.
